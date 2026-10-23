@@ -1,278 +1,301 @@
 import streamlit as st
-import yfinance as yf
+import sqlite3
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime
+from FinMind.data import DataLoader
+import os
 
-# 網頁基本設定
-st.set_page_config(page_title="台美股事件驅動量化回測平台", layout="wide")
-st.title("📊 台美股【大盤事件 × 個股表現】量化回測網站")
+st.set_page_config(page_title="台美股全籌碼事件量化回測系統", layout="wide")
+st.title("🏛️ 台美股【大盤事件 × 全市場 1800 檔籌碼/資券/借券/分點】量化回測平台")
 
-# ==================== 1. 預設市場與個股池設定 ====================
-MARKET_CONFIG = {
-    "🇹🇼 台股市場 (TW)": {
-        "indices": {
-            "加權指數 (^TWII)": "^TWII",
-            "櫃買指數 (^TWOII)": "^TWOII"
-        },
-        "default_stocks": [
-            "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2382.TW", "3711.TW", 
-            "2408.TW", "2344.TW", "3006.TW", "2383.TW", "6274.TWO", "6669.TW",
-            "3406.TW", "3037.TW", "2327.TW", "2412.TW", "2881.TW", "2882.TW",
-            "2603.TW", "1303.TW", "3661.TW", "3443.TW", "6531.TW"
-        ],
-        "stock_names": {
-            "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
-            "2382.TW": "廣達", "3711.TW": "日月光投控", "2408.TW": "南亞科", "2344.TW": "華邦電",
-            "3006.TW": "晶豪科", "2383.TW": "台光電", "6274.TWO": "台燿", "6669.TW": "緯穎",
-            "3406.TW": "玉晶光", "3037.TW": "欣興", "2327.TW": "國巨", "2412.TW": "中華電",
-            "2881.TW": "富邦金", "2882.TW": "國泰金", "2603.TW": "長榮", "1303.TW": "南亞",
-            "3661.TW": "世芯-KY", "3443.TW": "創意", "6531.TW": "愛普*"
-        }
-    },
-    "🇺🇸 美股市場 (US)": {
-        "indices": {
-            "S&P 500 (^GSPC)": "^GSPC",
-            "Nasdaq 綜合指數 (^IXIC)": "^IXIC",
-            "費城半導體指數 (^SOX)": "^SOX"
-        },
-        "default_stocks": [
-            "NVDA", "TSM", "MU", "AMD", "AVGO", "AAPL", "MSFT", "GOOGL", 
-            "META", "AMZN", "TSLA", "INTC", "QCOM", "AMAT", "LRCX", "SMCI",
-            "ARM", "MRVL", "KLAC", "JPM", "BRK-B", "LLY", "COST"
-        ],
-        "stock_names": {}
-    }
-}
+DB_PATH = "tw_quant_master.db"
 
-# ==================== 2. 側邊欄：參數控制台 ====================
-st.sidebar.header("⚙️ 1. 市場與大盤設定")
-market_choice = st.sidebar.radio("選擇市場", list(MARKET_CONFIG.keys()))
-m_cfg = MARKET_CONFIG[market_choice]
-
-index_label = st.sidebar.selectbox("選擇大盤指數", list(m_cfg["indices"].keys()))
-index_ticker = m_cfg["indices"][index_label]
-
-start_year = st.sidebar.slider("回測起始年份", 2008, 2025, 2008)
-index_drop_thresh = st.sidebar.slider("大盤單日跌幅觸發門檻 (%)", -8.0, -1.0, -3.0, 0.5)
-
-st.sidebar.header("⚙️ 2. 個股分群與持有設定")
-strong_thresh = st.sidebar.slider("【抗跌組】當日漲跌幅門檻 (%) ≥", -2.0, 5.0, 0.0, 0.5)
-weak_thresh = st.sidebar.slider("【重挫組】當日漲跌幅門檻 (%) ≤", -9.5, -3.0, -7.0, 0.5)
-
-custom_tickers_str = st.sidebar.text_area(
-    "個股池清單 (可自行新增代碼，逗號分隔)",
-    value=", ".join(m_cfg["default_stocks"]),
-    height=110
-)
-stock_tickers = [t.strip().upper() for t in custom_tickers_str.split(",") if t.strip()]
-
-# ==================== 3. 數據抓取與快取引擎 ====================
-@st.cache_data(ttl=3600, show_spinner="正在從 Yahoo Finance 下載大盤與個股歷史日 K 資料...")
-def load_market_data(idx_ticker, stk_tickers, start_yr):
-    all_tickers = list(set([idx_ticker] + stk_tickers))
-    start_date = f"{start_yr}-01-01"
-    raw = yf.download(all_tickers, start=start_date, auto_adjust=True, progress=False)
-    
-    if isinstance(raw.columns, pd.MultiIndex):
-        close_df = raw["Close"].copy()
-        open_df = raw["Open"].copy()
-    else:
-        close_df = pd.DataFrame({all_tickers[0]: raw["Close"]})
-        open_df = pd.DataFrame({all_tickers[0]: raw["Open"]})
-        
-    # 以大盤有開盤的交易日為基準對齊
-    valid_idx = close_df[idx_ticker].dropna().index
-    close_df = close_df.loc[valid_idx]
-    open_df = open_df.loc[valid_idx]
-    return close_df, open_df
-
-close_df, open_df = load_market_data(index_ticker, stock_tickers, start_year)
-available_stocks = [s for s in stock_tickers if s in close_df.columns]
-
-def format_stock_name(ticker):
-    cn_name = m_cfg["stock_names"].get(ticker, "")
-    return f"{ticker} ({cn_name})" if cn_name else ticker
-
-# ==================== 4. 向量化回測核心運算 ====================
-idx_ret = close_df[index_ticker].pct_change() * 100
-stk_ret = close_df[available_stocks].pct_change() * 100
-
-# 篩選大盤大跌事件日
-event_dates = idx_ret[idx_ret <= index_drop_thresh].index
-
-def run_group_backtest(hold_days):
-    # 隔日 (T+1) 開盤買進，持有 hold_days 個交易日收盤賣出
-    entry_price = open_df[available_stocks].shift(-1)
-    exit_price = close_df[available_stocks].shift(-(1 + hold_days))
-    fwd_ret = (exit_price - entry_price) / entry_price * 100
-
-    records = []
-    for dt in event_dates:
-        day_stk_ret = stk_ret.loc[dt].dropna()
-        day_fwd_ret = fwd_ret.loc[dt].dropna()
-        common = day_stk_ret.index.intersection(day_fwd_ret.index)
-        
-        if len(common) == 0:
-            continue
-            
-        s_ret = day_stk_ret[common]
-        f_ret = day_fwd_ret[common]
-        
-        strong_stocks = s_ret[s_ret >= strong_thresh].index.tolist()
-        weak_stocks = s_ret[s_ret <= weak_thresh].index.tolist()
-        
-        strong_avg = f_ret[strong_stocks].mean() if len(strong_stocks) > 0 else np.nan
-        weak_avg = f_ret[weak_stocks].mean() if len(weak_stocks) > 0 else np.nan
-        all_avg = f_ret.mean()
-        
-        records.append({
-            "事件日期": dt.strftime("%Y-%m-%d"),
-            "大盤單日跌幅(%)": round(idx_ret.loc[dt], 2),
-            "抗跌組檔數": len(strong_stocks),
-            "重挫組檔數": len(weak_stocks),
-            "抗跌組平均報酬(%)": strong_avg,
-            "重挫組平均報酬(%)": weak_avg,
-            "全樣本平均報酬(%)": all_avg,
-            "抗跌組名單": [format_stock_name(x) for x in strong_stocks],
-            "重挫組名單": [format_stock_name(x) for x in weak_stocks]
-        })
-    return pd.DataFrame(records), fwd_ret
-
-# ==================== 5. 視覺化三大分頁 ====================
-tab1, tab2, tab3 = st.tabs([
-    "🔥 分頁一：群組回測對決 (FinLab 模式)", 
-    "📋 分頁二：歷次大跌日個股名單與績效", 
-    "🎯 分頁三：單一個股 × 大盤聯動體檢"
+# ==================== 側邊欄：1. 市場與大盤觸發條件 ====================
+st.sidebar.header("🌍 1. 市場與大盤指數設定")
+market_mode = st.sidebar.radio("選擇回測模式", [
+    "🇹🇼 台股全市場 1800+ 檔 (含法人/資券/借券/分點)", 
+    "🇺🇸 美股核心標的與大盤 (Yahoo Finance)"
 ])
 
+if "🇹🇼" in market_mode:
+    index_choice = st.sidebar.selectbox("選擇台股大盤基準", ["加權指數 (^TWII)", "櫃買指數 (^TWOII)"])
+    index_ticker = "^TWII" if "TWII" in index_choice else "^TWOII"
+else:
+    index_choice = st.sidebar.selectbox("選擇美股大盤基準", ["S&P 500 (^GSPC)", "Nasdaq (^IXIC)", "費城半導體 (^SOX)"])
+    index_ticker = index_choice.split("(")[1].replace(")", "")
+
+start_year = st.sidebar.slider("回測起始年份", 2008, 2026, 2020)
+index_drop_thresh = st.sidebar.slider("大盤單日跌幅觸發門檻 (%)", -8.0, -1.0, -3.0, 0.5)
+
+# ==================== 側邊欄：2. 價量與分群條件 ====================
+st.sidebar.header("📈 2. 價量與強弱分群設定")
+min_volume_lots = st.sidebar.number_input("當日最低成交量門檻 (張)", min_value=0, value=1000, step=500)
+strong_thresh = st.sidebar.slider("【抗跌組】當日漲跌幅 (%) ≥", -2.0, 5.0, 0.0, 0.5)
+weak_thresh = st.sidebar.slider("【重挫組】當日漲跌幅 (%) ≤", -9.5, -3.0, -7.0, 0.5)
+
+# ==================== 側邊欄：3. 台股專屬進階籌碼濾網 ====================
+st.sidebar.header("🦅 3. 進階籌碼濾網 (法人/資券/借券/分點)")
+enable_chip_filter = st.sidebar.checkbox("啟用進階籌碼過濾條件 (套用至重挫跌深組)", value=False)
+
+with st.sidebar.expander("📌 三大法人買賣超條件 (張)", expanded=enable_chip_filter):
+    filter_it_buy = st.checkbox("限制【投信】當日買賣超 ≥ (張)", value=False)
+    it_min_lots = st.number_input("投信最低買超張數", value=50, step=50)
+    filter_fi_buy = st.checkbox("限制【外資】當日買賣超 ≥ (張)", value=False)
+    fi_min_lots = st.number_input("外資最低買超張數", value=100, step=100)
+
+with st.sidebar.expander("📌 融資融券斷頭/軋空條件 (張)", expanded=enable_chip_filter):
+    filter_margin_drop = st.checkbox("限制【融資】當日減肥 ≤ (張) [抓散戶斷頭]", value=False)
+    margin_max_change = st.number_input("融資當日增減上限 (負數代表減少)", value=-200, step=100)
+    filter_short_change = st.checkbox("限制【融券】當日增減 ≥ (張)", value=False)
+    short_min_change = st.number_input("融券當日增減下限", value=0, step=50)
+
+with st.sidebar.expander("📌 借券買賣與借券餘額條件 (張)", expanded=enable_chip_filter):
+    filter_sbl_net = st.checkbox("限制【借券賣出淨增減】≤ (張) [空頭不追空/還券]", value=False)
+    sbl_max_net = st.number_input("借券賣出淨增減上限 (負數代表淨還券)", value=0, step=50)
+    filter_sbl_bal = st.checkbox("限制【借券賣出總餘額】≤ (張)", value=False)
+    sbl_max_bal = st.number_input("借券賣出餘額上限 (張)", value=20000, step=1000)
+
+with st.sidebar.expander("📌 券商分點主力吸籌條件", expanded=enable_chip_filter):
+    target_brokers = st.text_input("指定買超主力分點關鍵字 (逗號分隔)", value="摩根士丹利, 凱基-台北, 美林, 高盛")
+    min_top5_conc = st.slider("大跌日【前5大買超分點佔成交量比 (%)】≥", 0.0, 50.0, 15.0, 2.5)
+    finmind_token = st.text_input("FinMind API Token (即時調閱分點明細用)", type="password")
+
+# ==================== 數據載入與整合函數 ====================
+@st.cache_data(ttl=1800)
+def get_index_data(idx_ticker, start_yr):
+    df = yf.download(idx_ticker, start=f"{start_yr}-01-01", auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df["idx_ret"] = df["Close"].pct_change() * 100
+    df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
+    return df
+
+idx_df = get_index_data(index_ticker, start_year)
+event_dates = idx_df[idx_df["idx_ret"] <= index_drop_thresh].index.tolist()
+
+def load_tw_full_db():
+    """從本地 SQLite 載入全台股 1800 檔價量與籌碼大表"""
+    if not os.path.exists(DB_PATH):
+        return None, None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        stock_info = pd.read_sql("SELECT stock_id, stock_name, industry_category, type FROM stock_info", conn)
+        query = """
+        SELECT 
+            p.date, p.stock_id, p.open, p.close, p.spread, p.volume_lots,
+            COALESCE(i.Foreign_Investor, 0) AS fi_net,
+            COALESCE(i.Investment_Trust, 0) AS it_net,
+            COALESCE(i.Dealer_Total, 0) AS dl_net,
+            COALESCE(m.MarginPurchaseTodayBalance, 0) AS margin_bal,
+            COALESCE(m.margin_net_change, 0) AS margin_chg,
+            COALESCE(m.ShortSaleTodayBalance, 0) AS short_bal,
+            COALESCE(m.short_net_change, 0) AS short_chg,
+            COALESCE(s.sbl_short_sale_lots, 0) AS sbl_sell,
+            COALESCE(s.sbl_returns_lots, 0) AS sbl_ret,
+            COALESCE(s.sbl_net_change_lots, 0) AS sbl_net_chg,
+            COALESCE(s.sbl_balance_lots, 0) AS sbl_bal
+        FROM daily_price p
+        LEFT JOIN institutional i ON p.date = i.date AND p.stock_id = i.stock_id
+        LEFT JOIN margin_short m ON p.date = m.date AND p.stock_id = m.stock_id
+        LEFT JOIN sbl_data s ON p.date = s.date AND p.stock_id = s.stock_id
+        """
+        df_all = pd.read_sql(query, conn)
+        conn.close()
+        return df_all, stock_info
+    except Exception:
+        conn.close()
+        return None, None
+
+# ==================== 主畫面三大核心分頁 ====================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔥 分頁一：全市場群組回測 (含籌碼濾網)",
+    "📋 分頁二：大跌日 1800 檔選股清單 (法人/資券/借券明細)",
+    "🏦 分頁三：券商分點主力抄底雷達",
+    "🕷️ 分頁四：資料庫狀態與一鍵更新控制台"
+])
+
+df_tw, info_tw = load_tw_full_db()
+
 with tab1:
-    st.subheader(f"當【{index_label}】單日跌幅 ≤ {index_drop_thresh}% 時：追強勢 vs. 撿跌深")
-    st.markdown(f"**歷史觸發總天數**：自 {start_year} 年以來共發生 **{len(event_dates)}** 天。")
+    st.subheader(f"📊 【{index_choice}】單日大跌 ≤ {index_drop_thresh}% 回測結果")
     
-    # 同時比較 1週(5天)、1個月(20天)、2個月(40天)
-    horizons = {"抱 1 週 (5交易日)": 5, "抱 1 個月 (20交易日)": 20, "抱 2 個月 (40交易日)": 40}
-    summary_rows = []
-    
-    for label, h_days in horizons.items():
-        df_res, _ = run_group_backtest(h_days)
-        if not df_res.empty:
-            # 篩選兩組同時有股票可比較的日子
-            both_valid = df_res.dropna(subset=["抗跌組平均報酬(%)", "重挫組平均報酬(%)"])
-            n_compare = len(both_valid)
-            weak_wins = (both_valid["重挫組平均報酬(%)"] > both_valid["抗跌組平均報酬(%)"]).sum()
-            strong_wins = n_compare - weak_wins
-            
-            avg_strong = both_valid["抗跌組平均報酬(%)"].mean()
-            avg_weak = both_valid["重挫組平均報酬(%)"].mean()
-            diff = avg_weak - avg_strong
-            
-            summary_rows.append({
-                "持有週期": label,
-                "兩組同時有股可比天數": f"{n_compare} 天",
-                "抗跌組勝出天數": f"{strong_wins} 天 ({strong_wins/n_compare*100:.1f}%)" if n_compare else "0",
-                "重挫組勝出天數": f"{weak_wins} 天 ({weak_wins/n_compare*100:.1f}%)" if n_compare else "0",
-                "抗跌組平均報酬": round(avg_strong, 2) if n_compare else 0,
-                "重挫組平均報酬": round(avg_weak, 2) if n_compare else 0,
-                "重挫組多賺差距 (百分點)": round(diff, 2) if n_compare else 0
-            })
-            
-    summary_df = pd.DataFrame(summary_rows)
-    if not summary_df.empty:
-        st.dataframe(summary_df, use_container_width=True)
+    if "🇹🇼" in market_mode and df_tw is not None and not df_tw.empty:
+        # 計算個股單日漲跌幅與未來持有報酬
+        df_tw = df_tw.sort_values(["stock_id", "date"])
+        df_tw["prev_close"] = df_tw.groupby("stock_id")["close"].shift(1)
+        df_tw["day_ret"] = (df_tw["close"] - df_tw["prev_close"]) / df_tw["prev_close"] * 100
         
-        # 繪製群組報酬對比長條圖
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
-            x=summary_df["持有週期"], y=summary_df["抗跌組平均報酬"],
-            name=f"逆勢抗跌組 (≥ {strong_thresh}%)", marker_color="#EF553B"
-        ))
-        fig_bar.add_trace(go.Bar(
-            x=summary_df["持有週期"], y=summary_df["重挫組平均報酬"],
-            name=f"重挫跌深組 (≤ {weak_thresh}%)", marker_color="#00CC96"
-        ))
-        fig_bar.update_layout(
-            title="不同持有週期下：抗跌組 vs. 重挫組 平均報酬率 (%)",
-            barmode="group", yaxis_title="平均報酬率 (%)", template="plotly_dark"
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        # 隔日 (T+1) 開盤價買進
+        df_tw["entry_open"] = df_tw.groupby("stock_id")["open"].shift(-1)
+        for h in [5, 20, 40]:
+            df_tw[f"exit_{h}d"] = df_tw.groupby("stock_id")["close"].shift(-(1 + h))
+            df_tw[f"ret_{h}d"] = (df_tw[f"exit_{h}d"] - df_tw["entry_open"]) / df_tw["entry_open"] * 100
+
+        # 篩選大盤大跌事件日且成交量達標的個股
+        df_events = df_tw[(df_tw["date"].isin(event_dates)) & (df_tw["volume_lots"] >= min_volume_lots)].copy()
+
+        # 建立抗跌組與重挫組遮罩
+        cond_strong = df_events["day_ret"] >= strong_thresh
+        cond_weak = df_events["day_ret"] <= weak_thresh
+
+        # 若啟用進階籌碼濾網，套用到重挫跌深組
+        if enable_chip_filter:
+            if filter_it_buy:
+                cond_weak = cond_weak & (df_events["it_net"] >= it_min_lots)
+            if filter_fi_buy:
+                cond_weak = cond_weak & (df_events["fi_net"] >= fi_min_lots)
+            if filter_margin_drop:
+                cond_weak = cond_weak & (df_events["margin_chg"] <= margin_max_change)
+            if filter_short_change:
+                cond_weak = cond_weak & (df_events["short_chg"] >= short_min_change)
+            if filter_sbl_net:
+                cond_weak = cond_weak & (df_events["sbl_net_chg"] <= sbl_max_net)
+            if filter_sbl_bal:
+                cond_weak = cond_weak & (df_events["sbl_bal"] <= sbl_max_bal)
+
+        summary_list = []
+        for label, h in [("抱 1 週 (5天)", 5), ("抱 1 個月 (20天)", 20), ("抱 2 個月 (40天)", 40)]:
+            g_strong = df_events[cond_strong].groupby("date")[f"ret_{h}d"].mean()
+            g_weak = df_events[cond_weak].groupby("date")[f"ret_{h}d"].mean()
+            comp = pd.concat([g_strong.rename("strong"), g_weak.rename("weak")], axis=1).dropna()
+            
+            n_days = len(comp)
+            weak_win_days = (comp["weak"] > comp["strong"]).sum() if n_days > 0 else 0
+            summary_list.append({
+                "持有週期": label,
+                "有效對決大跌日數": n_days,
+                "抗跌組平均報酬 (%)": round(comp["strong"].mean(), 2) if n_days else 0,
+                "重挫組(含籌碼濾網)平均報酬 (%)": round(comp["weak"].mean(), 2) if n_days else 0,
+                "重挫組超額勝出 (百分點)": round((comp["weak"] - comp["strong"]).mean(), 2) if n_days else 0,
+                "重挫組勝率 (%)": round(weak_win_days / n_days * 100, 1) if n_days else 0
+            })
+        
+        st.dataframe(pd.DataFrame(summary_list), use_container_width=True)
+    else:
+        st.info("💡 本地資料庫尚未建立或目前切換為美股模式。請至【分頁四】點擊一鍵初始化全台股 1,800 檔資料庫，或先執行 `python db_updater.py`。")
 
 with tab2:
-    st.subheader("📋 歷次大盤大跌日：個股分群名單與後續表現")
-    sel_hold = st.selectbox("選擇檢視的持有天數", [5, 20, 40], index=1, format_func=lambda x: f"持有 {x} 個交易日")
-    df_detail, fwd_ret_matrix = run_group_backtest(sel_hold)
-    
-    if not df_detail.empty:
-        df_show = df_detail.sort_values("事件日期", ascending=False)
-        selected_date = st.selectbox("選擇特定大跌日查看當天個股明細", df_show["事件日期"].tolist())
-        
-        row_data = df_show[df_show["事件日期"] == selected_date].iloc[0]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("大盤當日跌幅", f"{row_data['大盤單日跌幅(%)']}%")
-        c2.metric(f"抗跌組 ({row_data['抗跌組檔數']}檔) 後續平均", f"{row_data['抗跌組平均報酬(%)']:.2f}%" if pd.notna(row_data['抗跌組平均報酬(%)']) else "無符合個股")
-        c3.metric(f"重挫組 ({row_data['重挫組檔數']}檔) 後續平均", f"{row_data['重挫組平均報酬(%)']:.2f}%" if pd.notna(row_data['重挫組平均報酬(%)']) else "無符合個股")
-        
-        col_left, col_right = st.columns(2)
-        with col_left:
-            st.markdown(f"#### 🔴 當日逆勢抗跌名單 (≥ {strong_thresh}%)")
-            st.write(", ".join(row_data["抗跌組名單"]) if row_data["抗跌組名單"] else "當日無個股符合")
-        with col_right:
-            st.markdown(f"#### 🟢 當日重挫跌深名單 (≤ {weak_thresh}%)")
-            st.write(", ".join(row_data["重挫組名單"]) if row_data["重挫組名單"] else "當日無個股符合")
+    st.subheader("📋 大跌日個股完整籌碼透視表 (成交量 / 三大法人 / 資券 / 借券)")
+    if df_tw is not None and not df_tw.empty:
+        avail_event_dates = sorted(df_tw[df_tw["date"].isin(event_dates)]["date"].unique(), reverse=True)
+        if avail_event_dates:
+            sel_dt = st.selectbox("選擇歷史大跌事件日", avail_event_dates)
+            day_df = df_tw[(df_tw["date"] == sel_dt) & (df_tw["volume_lots"] >= min_volume_lots)].merge(
+                info_tw, on="stock_id", how="left"
+            )
             
-        st.markdown("#### 歷次大跌事件統計總表")
-        st.dataframe(df_show.drop(columns=["抗跌組名單", "重挫組名單"]), use_container_width=True)
+            group_view = st.radio("篩選檢視群組", [
+                f"🟢 重挫跌深組 (≤ {weak_thresh}%，套用左側籌碼濾網)",
+                f"🔴 逆勢抗跌組 (≥ {strong_thresh}%)",
+                "🌐 當日全市場達標個股"
+            ], horizontal=True)
+            
+            if "重挫" in group_view:
+                sub_df = day_df[day_df["day_ret"] <= weak_thresh]
+                if enable_chip_filter:
+                    if filter_it_buy: sub_df = sub_df[sub_df["it_net"] >= it_min_lots]
+                    if filter_fi_buy: sub_df = sub_df[sub_df["fi_net"] >= fi_min_lots]
+                    if filter_margin_drop: sub_df = sub_df[sub_df["margin_chg"] <= margin_max_change]
+                    if filter_short_change: sub_df = sub_df[sub_df["short_chg"] >= short_min_change]
+                    if filter_sbl_net: sub_df = sub_df[sub_df["sbl_net_chg"] <= sbl_max_net]
+                    if filter_sbl_bal: sub_df = sub_df[sub_df["sbl_bal"] <= sbl_max_bal]
+            elif "抗跌" in group_view:
+                sub_df = day_df[day_df["day_ret"] >= strong_thresh]
+            else:
+                sub_df = day_df
+
+            display_cols = {
+                "stock_id": "代碼", "stock_name": "名稱", "industry_category": "產業",
+                "close": "收盤價", "day_ret": "當日漲跌(%)", "volume_lots": "成交量(張)",
+                "fi_net": "外資買賣超(張)", "it_net": "投信買賣超(張)", "dl_net": "自營商(張)",
+                "margin_chg": "融資增減(張)", "margin_bal": "融資餘額(張)",
+                "short_chg": "融券增減(張)", "sbl_net_chg": "借券賣出淨增減(張)", "sbl_bal": "借券餘額(張)",
+                "ret_5d": "抱1週報酬(%)", "ret_20d": "抱1月報酬(%)"
+            }
+            avail_cols = [c for c in display_cols.keys() if c in sub_df.columns]
+            st.dataframe(
+                sub_df[avail_cols].rename(columns=display_cols).sort_values("當日漲跌(%)"),
+                use_container_width=True
+            )
 
 with tab3:
-    st.subheader("🎯 單一個股 × 大盤崩跌日 深度體檢")
-    target_stock = st.selectbox("選擇要單獨分析的個股", available_stocks, format_func=format_stock_name)
-    ind_hold_days = st.slider("設定買進後持有交易日數", 1, 60, 20)
+    st.subheader("🏦 券商分點主力抄底雷達 (大跌日誰在偷接刀？)")
+    st.markdown("指定大跌事件日與個股，直接剖析當日 **前 15 大買超/賣超券商分點**、**主力集中度** 與 **指定外資/地緣分點動向**。")
     
-    # 計算該個股在所有大盤大跌日的表現
-    idx_entry = open_df[index_ticker].shift(-1)
-    idx_exit = close_df[index_ticker].shift(-(1 + ind_hold_days))
-    idx_fwd = (idx_exit - idx_entry) / idx_entry * 100
+    c_stk, c_dt, c_btn = st.columns([2, 2, 1])
+    target_stk_id = c_stk.text_input("輸入台股代碼 (4碼)", value="2408")
+    target_event_dt = c_dt.text_input("輸入大跌事件日期 (YYYY-MM-DD)", value=event_dates[-1] if event_dates else "2024-08-05")
     
-    stk_entry = open_df[target_stock].shift(-1)
-    stk_exit = close_df[target_stock].shift(-(1 + ind_hold_days))
-    stk_fwd = (stk_exit - stk_entry) / stk_entry * 100
-    
-    ind_records = []
-    for dt in event_dates:
-        if pd.notna(stk_ret.loc[dt, target_stock]) and pd.notna(stk_fwd.loc[dt]):
-            ind_records.append({
-                "事件日期": dt.strftime("%Y-%m-%d"),
-                "大盤當日跌幅(%)": round(idx_ret.loc[dt], 2),
-                "個股當日漲跌(%)": round(stk_ret.loc[dt, target_stock], 2),
-                f"個股隔日買抱{ind_hold_days}天報酬(%)": round(stk_fwd.loc[dt], 2),
-                f"大盤同期報酬(%)": round(idx_fwd.loc[dt], 2),
-                "超額報酬 Alpha(%)": round(stk_fwd.loc[dt] - idx_fwd.loc[dt], 2)
-            })
-            
-    df_ind = pd.DataFrame(ind_records)
-    if not df_ind.empty:
-        win_rate = (df_ind[f"個股隔日買抱{ind_hold_days}天報酬(%)"] > 0).mean() * 100
-        avg_ret = df_ind[f"個股隔日買抱{ind_hold_days}天報酬(%)"].mean()
-        avg_alpha = df_ind["超額報酬 Alpha(%)"].mean()
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("歷史參與大跌次數", f"{len(df_ind)} 次")
-        m2.metric(f"抱 {ind_hold_days} 天正報酬勝率", f"{win_rate:.1f}%")
-        m3.metric(f"抱 {ind_hold_days} 天平均報酬", f"{avg_ret:.2f}%")
-        m4.metric("平均擊敗大盤 (Alpha)", f"{avg_alpha:.2f}%")
-        
-        # 散佈圖：個股當日跌幅 vs. 後續反彈幅度
-        fig_scatter = px.scatter(
-            df_ind, x="個股當日漲跌(%)", y=f"個股隔日買抱{ind_hold_days}天報酬(%)",
-            hover_data=["事件日期", "大盤當日跌幅(%)"],
-            color="超額報酬 Alpha(%)", color_continuous_scale="RdYlGn",
-            title=f"{format_stock_name(target_stock)}：大盤重挫當日漲跌幅 vs. 隔日買進抱 {ind_hold_days} 天報酬率",
-            template="plotly_dark"
-        )
-        fig_scatter.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig_scatter.add_vline(x=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig_scatter, use_container_width=True)
-        
-        st.dataframe(df_ind.sort_values("事件日期", ascending=False), use_container_width=True)
+    if c_btn.button("🔍 調閱當日分點明細"):
+        dl = DataLoader()
+        if finmind_token:
+            dl.login_by_token(api_token=finmind_token)
+        with st.spinner(f"正在抓取 {target_stk_id} 於 {target_event_dt} 的全台券商分點明細..."):
+            df_brk = dl.taiwan_stock_trading_daily_report(
+                stock_id=target_stk_id, start_date=target_event_dt, end_date=target_event_dt
+            )
+            if not df_brk.empty:
+                # 依分點彙總 (同一分點不同價位合併)
+                brk_sum = df_brk.groupby(["securities_trader_id", "securities_trader"]).agg(
+                    buy_shares=("buy", "sum"),
+                    sell_shares=("sell", "sum")
+                ).reset_index()
+                brk_sum["買進(張)"] = (brk_sum["buy_shares"] / 1000).round(1)
+                brk_sum["賣出(張)"] = (brk_sum["sell_shares"] / 1000).round(1)
+                brk_sum["買賣超(張)"] = (brk_sum["買進(張)"] - brk_sum["賣出(張)"]).round(1)
+                
+                total_buy_lots = brk_sum["買進(張)"].sum()
+                top5_buy_net = brk_sum.sort_values("買賣超(張)", ascending=False).head(5)["買賣超(張)"].sum()
+                top5_conc = (top5_buy_net / total_buy_lots * 100) if total_buy_lots > 0 else 0
+                
+                # 檢查指定關鍵字分點
+                kw_list = [k.strip() for k in target_brokers.split(",") if k.strip()]
+                kw_pattern = "|".join(kw_list)
+                matched_brokers = brk_sum[brk_sum["securities_trader"].str.contains(kw_pattern, na=False)]
+                
+                k1, k2, k3 = st.columns(3)
+                k1.metric("前 5 大買超分點合計淨買超", f"{top5_buy_net:,.1f} 張")
+                k2.metric("前 5 大買超主力集中度", f"{top5_conc:.2f}%", 
+                          delta="達標主力吸籌" if top5_conc >= min_top5_conc else "未達門檻")
+                k3.metric("指定關鍵分點淨買賣超合計", f"{matched_brokers['買賣超(張)'].sum():,.1f} 張")
+                
+                b_left, b_right = st.columns(2)
+                with b_left:
+                    st.markdown("#### 🟢 當日買超前 15 大主力分點 (偷接刀主力)")
+                    st.dataframe(
+                        brk_sum.sort_values("買賣超(張)", ascending=False).head(15)[
+                            ["securities_trader_id", "securities_trader", "買進(張)", "賣出(張)", "買賣超(張)"]
+                        ], use_container_width=True
+                    )
+                with b_right:
+                    st.markdown("#### 🔴 當日賣超前 15 大主力分點 (恐慌殺出分點)")
+                    st.dataframe(
+                        brk_sum.sort_values("買賣超(張)", ascending=True).head(15)[
+                            ["securities_trader_id", "securities_trader", "買進(張)", "賣出(張)", "買賣超(張)"]
+                        ], use_container_width=True
+                    )
+            else:
+                st.warning("查無該日分點資料，請確認該日是否為台股交易日，或於左側填入免費的 FinMind API Token。")
+
+with tab4:
+    st.subheader("🕷️ 全台股 1,800 檔自動爬蟲與本地資料庫管理")
+    st.markdown("""
+    為確保回測能在 **1 秒內** 完成，系統採用 `SQLite` 本地高速資料庫 (`tw_quant_master.db`)。
+    你可以在此直接指定要抓取的『大盤大跌事件日』，一鍵把當天全台股 1,800 檔的 **日K、成交量、三大法人、融資融券、借券買賣與餘額** 全部抓進資料庫！
+    """)
+    if st.button("🚀 一鍵同步全台股 1,800 檔股票清單與近期大跌事件日數據"):
+        from db_updater import TWStockCrawler
+        crawler = TWStockCrawler(api_token=finmind_token)
+        crawler.update_stock_list()
+        progress = st.progress(0)
+        # 抓取最近 10 個大盤大跌日及其後續區間
+        target_events = event_dates[-5:] if len(event_dates) >= 5 else event_dates
+        for idx, dt in enumerate(target_events):
+            st.write(f"正在抓取事件日 {dt} 全市場 1,800 檔數據...")
+            crawler.fetch_and_save_by_date(dt)
+            progress.progress((idx + 1) / len(target_events))
+        crawler.deduplicate_tables()
+        st.success("✅ 全市場上市櫃清單與五大籌碼資料表同步完成！請重新整理網頁即可開始回測。")
