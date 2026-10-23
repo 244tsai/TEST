@@ -1,7 +1,10 @@
-streamlit
+streamlit>=1.35.0
 yfinance
 pandas
 numpy
 plotly
 FinMind
 requests
+pyarrow
+beautifulsoup4
+lxml
