@@ -208,11 +208,9 @@ def build_full_quant_matrices(mkt_mode, start_yr):
     for j, code in enumerate(stk_codes):
         beta = rng.uniform(0.75, 1.55)
         s_r = idx_ret * beta + rng.normal(0.03, 2.1, n_days)
-        # 在大盤崩跌日分化出「逆勢收紅股」與「重挫跌深 >7% 股」且重挫股後續具超額均值回歸反彈力道
         for c_idx in crash_days:
             if rng.random() < 0.38:
                 s_r[c_idx] = -rng.uniform(7.1, 9.8)
-                # 跌深股隔日開盤買進後 5~40 天具備顯著反彈期望值
                 s_r[c_idx + 1 : min(n_days, c_idx + 42)] += rng.uniform(0.22, 0.48)
             elif rng.random() < 0.25:
                 s_r[c_idx] = rng.uniform(0.1, 3.8)
@@ -269,7 +267,6 @@ def get_stock_label(code):
     cn = ALL_TW_STOCKS.get(code, "")
     return f"{code} {cn}".strip()
 
-# 建立全域籌碼與成交量濾網遮罩
 base_chip_mask = (QM["vol"] >= min_volume_lots)
 if enable_chip_filter:
     if filter_it_buy:
@@ -289,7 +286,6 @@ if enable_chip_filter:
     if filter_brk_conc:
         base_chip_mask = base_chip_mask & (QM["brk_conc"] >= min_top5_conc)
 
-# ==================== 輔助函數：日期區間選擇器 (1/3/5/10/20/60/120日 + 自設) ====================
 def render_date_range_selector(key_prefix, default_preset="1日內"):
     preset_list = ["1日內", "3日內", "5日內", "10日內", "20日內", "60日內", "120日內", "自設區間"]
     c_p, c_d1, c_d2 = st.columns([2.3, 1.1, 1.1])
@@ -312,10 +308,8 @@ def render_date_range_selector(key_prefix, default_preset="1日內"):
         end_d = c_d2.date_input("自設結束日", value=latest_dt, key=f"{key_prefix}_e_cust")
         return start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d")
 
-# ==================== 分頁四核心：eBrokerDJ 真實連線爬蟲 + 本地快取引擎 ====================
 @st.cache_data(ttl=1800)
 def fetch_layer1_brokers(stock_code: str, start_str: str, end_str: str):
-    """直連 eBrokerDJ 個股分點明細 (/z/zc/zco/zco.djhtm)，設 4 秒快速 Timeout"""
     url = f"https://fubon-ebrokerdj.fbs.com.tw/z/zc/zco/zco.djhtm?a={stock_code}&e={start_str}&f={end_str}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=4, verify=False)
@@ -361,7 +355,6 @@ def fetch_layer1_brokers(stock_code: str, start_str: str, end_str: str):
 
 @st.cache_data(ttl=1800)
 def fetch_layer2_broker_stocks(broker_name: str, start_str: str, end_str: str, unit_is_amt: bool = True):
-    """直連 eBrokerDJ 券商分點買賣超個股排行 (/z/zg/zgb/zgb0.djhtm)"""
     c_flag = "E" if unit_is_amt else "B"
     parent_id, branch_id = BROKER_BRANCH_MAP.get(broker_name, ("5850", "5852"))
     url = f"https://fubon-ebrokerdj.fbs.com.tw/z/zg/zgb/zgb0.djhtm?a={parent_id}&b={branch_id}&c={c_flag}&e={start_str}&f={end_str}"
@@ -407,7 +400,6 @@ def fetch_layer2_broker_stocks(broker_name: str, start_str: str, end_str: str, u
 
 @st.cache_data(ttl=1800)
 def fetch_layer3_daily_detail(broker_name: str, stock_code: str, start_str: str, end_str: str):
-    """直連 eBrokerDJ 單一券商對單一個股每日進出明細 (/z/zc/zco/zco0/zco0.djhtm)"""
     parent_id, branch_id = BROKER_BRANCH_MAP.get(broker_name, ("5850", "5852"))
     url = f"https://fubon-ebrokerdj.fbs.com.tw/z/zc/zco/zco0/zco0.djhtm?a={stock_code}&b={branch_id}&BHID={parent_id}"
     try:
@@ -446,7 +438,6 @@ def fetch_layer3_daily_detail(broker_name: str, stock_code: str, start_str: str,
         rows.append({"日期": d, "買進(張)": b_l, "賣出(張)": s_l, "買賣總額(張)": b_l + s_l, "買賣超(張)": b_l - s_l})
     return pd.DataFrame(rows), "⚡ 本地高速快取模式"
 
-# ==================== 六大核心分頁 ====================
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔥 分頁一：動態最佳化矩陣 (FinLab對決+尋優)",
     "📋 分頁二：歷史事件風控明細 (含法人/資券/借券)",
@@ -456,7 +447,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🌊 分頁六：即時資金流與主動買賣盤回測 (09:00~13:30)"
 ])
 
-# -------------------- 【分頁一】動態最佳化矩陣與強弱群組對決 --------------------
+# -------------------- 【分頁一】動態最佳化矩陣 --------------------
 with tab1:
     st.subheader(f"🚀 【{index_choice}】動態參數掃描、抗跌 vs. 重挫群組對決與最高期望值尋優")
     if "大盤" in event_type:
@@ -518,10 +509,14 @@ with tab1:
             mode="lines+markers", name=f"逆勢抗跌組 (≥{strong_thresh}%)", line=dict(color="#EF553B", width=2.5, dash="dash")
         ))
         fig_ev.update_layout(title="不同持有天數下：【重挫跌深組 vs. 逆勢抗跌組】單次期望值曲線對決", xaxis_title="持有天數", yaxis_title="平均報酬率 (%)", template="plotly_dark", height=390)
-        st.plotly_chart(fig_ev, width="stretch")
-        st.dataframe(df_mat, width="stretch", hide_index=True)
+        st.plotly_chart(fig_ev, use_container_width=True)
+        st.dataframe(df_mat, use_container_width=True, hide_index=True)
+        
+        # 新增下載按鈕
+        csv_mat = df_mat.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 下載動態最佳化矩陣 CSV", data=csv_mat, file_name="quant_matrix_results.csv", mime="text/csv")
 
-# -------------------- 【分頁二】歷史每次發生事件明細與完整籌碼狀態 --------------------
+# -------------------- 【分頁二】歷史每次發生事件明細 --------------------
 with tab2:
     st.subheader("📋 歷史每次觸發事件完整明細（發生日期、當下法人/資券/借券狀態、單次最大虧損與利潤）")
     sel_h_days = st.slider("選擇檢視持有天數", int(hold_min), int(hold_max), min(20, int(hold_max)))
@@ -568,9 +563,12 @@ with tab2:
         m3.metric("歷史勝率", f"{(df_det[col_r] > 0).mean()*100:.1f}%")
         m4.metric("💎 單次最大利潤", f"{df_det[col_r].max():+.2f}%")
         m5.metric("💥 單次最大回測虧損", f"{df_det[col_r].min():+.2f}%")
-        st.dataframe(df_det.sort_values("觸發日期", ascending=False), width="stretch", hide_index=True)
+        st.dataframe(df_det.sort_values("觸發日期", ascending=False), use_container_width=True, hide_index=True)
+        
+        csv_det = df_det.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 下載歷史事件明細 CSV", data=csv_det, file_name="historical_event_details.csv", mime="text/csv")
 
-# -------------------- 【分頁三】單一個股最佳買點與持有天數 2D 熱力圖尋優 --------------------
+# -------------------- 【分頁三】單一個股最佳買點與持有天數 2D 熱力圖 --------------------
 with tab3:
     st.subheader("🎯 單一個股【跌幾 % × 抱幾天】最高期望值 2D 矩陣尋優")
     target_col = st.selectbox("選擇要深度尋優的個股", stk_cols, format_func=get_stock_label)
@@ -615,16 +613,14 @@ with tab3:
             colorscale="RdYlGn", text=heatmap_z, texttemplate="%{text}%", colorbar=dict(title="期望值(%)")
         ))
         fig_hm.update_layout(title=f"{get_stock_label(target_col)}【當日跌幅 × 持有天數】單次期望值熱力圖 (%)", height=390, template="plotly_dark")
-        st.plotly_chart(fig_hm, width="stretch")
-        st.dataframe(df_opt.sort_values("單次期望值 (%)", ascending=False), width="stretch", hide_index=True)
+        st.plotly_chart(fig_hm, use_container_width=True)
+        st.dataframe(df_opt.sort_values("單次期望值 (%)", ascending=False), use_container_width=True, hide_index=True)
 
 # ==================== 【分頁四】券商分點三層點擊連動透視表 ====================
 with tab4:
     st.subheader("🏦 券商分點三層點擊連動透視系統（支援全台 1,800+ 檔上市櫃個股 ＆ 1/3/5/10/20/60/120日統計）")
     st.caption("💡 操作說明：在【第一層】直接點擊表格任一券商分點 $\\rightarrow$ 自動連動【第二層】顯示該券商買賣超個股排名 $\\rightarrow$ 點擊任一個股自動連動【第三層】展開每日進出明細與雙層走勢圖！")
 
-    # -------------------- 第一層：個股券商分點買賣超排行 --------------------
-    st.markdown("### 🔹 第一層：當日/區間 券商分點買賣超排行與主力進出比較圖")
     c_l1_pick, c_l1_manual = st.columns([2.2, 1.3])
     all_stock_keys = list(ALL_TW_STOCKS.keys())
     if st.session_state.selected_stock_l1 not in all_stock_keys:
@@ -647,7 +643,6 @@ with tab4:
     df_l1_brk, l1_src = fetch_layer1_brokers(l1_stock, l1_start, l1_end)
     st.caption(f"📡 第一層資料狀態：**{l1_src}**｜查詢標的：**{l1_stock} {ALL_TW_STOCKS.get(l1_stock, '')}**（區間：`{l1_start}` ~ `{l1_end}`）")
 
-    # 繪製第一層頂部「股價 vs. 主力買賣超」雙層比較圖 (對齊附圖)
     chart_dates_l1 = QM["dates"][-45:]
     s_col_ref = l1_stock if l1_stock in QM["close"].columns else stk_cols[0]
     p_series_l1 = QM["close"].loc[chart_dates_l1, s_col_ref].values
@@ -661,7 +656,7 @@ with tab4:
     fig_l1.add_trace(go.Scatter(x=chart_dates_l1, y=p_series_l1, mode="lines", name="股價", line=dict(color="#E45756", width=2.5)), row=1, col=1)
     fig_l1.add_trace(go.Bar(x=chart_dates_l1, y=main_bars_l1, name="主力買賣超", marker_color=["#E45756" if v >= 0 else "#4C78A8" for v in main_bars_l1]), row=2, col=1)
     fig_l1.update_layout(height=320, showlegend=False, template="plotly_white", margin=dict(t=35, b=15))
-    st.plotly_chart(fig_l1, width="stretch")
+    st.plotly_chart(fig_l1, use_container_width=True)
 
     if not df_l1_brk.empty:
         df_buy_show = df_l1_brk[df_l1_brk["買賣超"] > 0].sort_values("買賣超", ascending=False).head(15).rename(columns={"broker_name": "買超券商"}).reset_index(drop=True)
@@ -672,28 +667,27 @@ with tab4:
         col_b1, col_b2 = st.columns(2)
         with col_b1:
             st.markdown("#### 🟢 買超券商分點排行（👆 點擊表格任一列連動第二層）")
-            ev_buy = st.dataframe(df_buy_show, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key="l1_buy_table")
+            ev_buy = st.dataframe(df_buy_show, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="l1_buy_table")
             if ev_buy.selection.rows:
                 st.session_state.selected_broker = str(df_buy_show.iloc[ev_buy.selection.rows[0]]["買超券商"])
             st.markdown(f"**合計買超張數：`{int(df_buy_show['買賣超'].sum()):,}` 張** ｜ **平均買超成本：`{float(p_series_l1[-1]):,.2f}` 元**")
 
         with col_b2:
             st.markdown("#### 🔴 賣超券商分點排行（👆 點擊表格任一列連動第二層）")
-            ev_sell = st.dataframe(df_sell_show, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key="l1_sell_table")
+            ev_sell = st.dataframe(df_sell_show, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="l1_sell_table")
             if ev_sell.selection.rows:
                 st.session_state.selected_broker = str(df_sell_show.iloc[ev_sell.selection.rows[0]]["賣超券商"])
             st.markdown(f"**合計賣超張數：`{int(df_sell_show['賣超'].sum()):,}` 張** ｜ **平均賣超成本：`{float(p_series_l1[-1]*0.995):,.2f}` 元**")
 
     st.divider()
 
-    # -------------------- 第二層：點擊券商分點 -> 該券商買賣超個股排名 --------------------
     st.markdown(f"### 🔹 第二層：【{st.session_state.selected_broker}】分點買賣超全市場個股排行查詢")
     c_brk_sel, c_unit_sel = st.columns([2, 2])
     broker_options = list(BROKER_BRANCH_MAP.keys())
     if st.session_state.selected_broker not in broker_options:
         broker_options = [st.session_state.selected_broker] + broker_options
 
-    chosen_broker = c_brk_sel.selectbox("當前鎖定券商分點（可由上方表格點擊自動帶入，或直接切換）", broker_options, index=broker_options.index(st.session_state.selected_broker), key="l2_broker_box")
+    chosen_broker = c_brk_sel.selectbox("當前鎖定券商分點", broker_options, index=broker_options.index(st.session_state.selected_broker), key="l2_broker_box")
     st.session_state.selected_broker = chosen_broker
     unit_mode = c_unit_sel.radio("統計單位切換", ["🔘 金額 (單位: 仟元)", "⚪ 張數 (單位: 張)"], horizontal=True, key="l2_unit")
     l2_start, l2_end = render_date_range_selector("layer2", default_preset="1日內")
@@ -712,20 +706,19 @@ with tab4:
         with c_l2_left:
             st.markdown(f"#### 🟢 【{chosen_broker}】買超個股排行（👆 點擊個股連動第三層）")
             df_l2_b_show = df_l2_buy[["個股名稱", "買進", "賣出", "差額"]].rename(columns={"買進": u_col_in, "賣出": u_col_out})
-            ev_l2_b = st.dataframe(df_l2_b_show, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key="l2_buy_stk_tbl")
+            ev_l2_b = st.dataframe(df_l2_b_show, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="l2_buy_stk_tbl")
             if ev_l2_b.selection.rows:
                 st.session_state.selected_stock_l3 = str(df_l2_buy.iloc[ev_l2_b.selection.rows[0]]["stock_id"])
 
         with c_l2_right:
             st.markdown(f"#### 🔴 【{chosen_broker}】賣超個股排行（👆 點擊個股連動第三層）")
             df_l2_s_show = df_l2_sell[["個股名稱", "買進", "賣出", "差額"]].rename(columns={"買進": u_col_in, "賣出": u_col_out})
-            ev_l2_s = st.dataframe(df_l2_s_show, width="stretch", hide_index=True, on_select="rerun", selection_mode="single-row", key="l2_sell_stk_tbl")
+            ev_l2_s = st.dataframe(df_l2_s_show, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key="l2_sell_stk_tbl")
             if ev_l2_s.selection.rows:
                 st.session_state.selected_stock_l3 = str(df_l2_sell.iloc[ev_l2_s.selection.rows[0]]["stock_id"])
 
     st.divider()
 
-    # -------------------- 第三層：再點擊個股 -> 該券商對該個股每日進出明細表 --------------------
     l3_stk_code = st.session_state.selected_stock_l3
     if l3_stk_code not in ALL_TW_STOCKS:
         ALL_TW_STOCKS[l3_stk_code] = ""
@@ -734,7 +727,7 @@ with tab4:
     st.markdown(f"### 🔹 第三層：【{chosen_broker}】對【{l3_stk_code} {ALL_TW_STOCKS.get(l3_stk_code, '')}】每日進出明細表")
     c_l3_stk_sel, _ = st.columns([2, 3])
     l3_stk_code = c_l3_stk_sel.selectbox(
-        "當前鎖定個股（可由第二層點擊自動帶入，或直接搜尋切換）",
+        "當前鎖定個股",
         all_stock_keys,
         index=all_stock_keys.index(l3_stk_code),
         format_func=lambda x: f"{x} {ALL_TW_STOCKS.get(x, '')}",
@@ -759,13 +752,13 @@ with tab4:
         bar_colors_l3 = ["#4C78A8" if v >= 0 else "#E45756" for v in df_plot_l3["買賣超(張)"]]
         fig_l3.add_trace(go.Bar(x=df_plot_l3["日期"], y=df_plot_l3["買賣超(張)"], name="買賣超(張)", marker_color=bar_colors_l3), row=2, col=1)
         fig_l3.update_layout(height=330, showlegend=False, template="plotly_white", margin=dict(t=35, b=15))
-        st.plotly_chart(fig_l3, width="stretch")
+        st.plotly_chart(fig_l3, use_container_width=True)
 
         total_cum_net = int(df_l3_daily["買賣超(張)"].sum())
         st.markdown(f"#### 📋 進出明細表（期間累計買賣超張數：`{total_cum_net:,}` 張）")
-        st.dataframe(df_l3_daily, width="stretch", hide_index=True)
+        st.dataframe(df_l3_daily, use_container_width=True, hide_index=True)
 
-# ==================== 【分頁五】三大法人與融資券買賣超金額統計 (完全修正 Arrow 型別相容性) ====================
+# ==================== 【分頁五】三大法人與融資券買賣超金額統計 ====================
 with tab5:
     st.subheader("🏛️ 三大法人與融資融券買賣超金額統計（上市 / 上櫃 / 興櫃 ＆ 期貨整日 / 夜盤區分）")
     t5_start, t5_end = render_date_range_selector("tab5_inst", default_preset="1日內")
@@ -775,7 +768,6 @@ with tab5:
     unit_mult = 1.0 if "億元" in amt_unit else 100000.0
     unit_label = "億元" if "億元" in amt_unit else "仟元"
 
-    # 依所選日期區間天數動態計算統計金額 (嚴格保持全字串格式化或全浮點數，徹底杜絕 pyarrow ArrowInvalid 報錯)
     n_sel_days = max(1, len([d for d in QM["dates"] if t5_start <= d <= t5_end]))
     scale_d = np.sqrt(n_sel_days)
 
@@ -834,7 +826,7 @@ with tab5:
         }
     ]
     st.markdown(f"### 📊 一、現貨市場（上市/上櫃/興櫃）三大法人與融資融券買賣超金額統計（單位：`{unit_label}`）")
-    st.dataframe(pd.DataFrame(spot_rows), width="stretch", hide_index=True)
+    st.dataframe(pd.DataFrame(spot_rows), use_container_width=True, hide_index=True)
 
     lot_mult = 4.0 if "小型" in fut_contract_sel else (20.0 if "微型" in fut_contract_sel else (1.15 if "折算" in fut_contract_sel else 1.0))
     fut_rows = [
@@ -879,14 +871,7 @@ with tab5:
         }
     ]
     st.markdown("### ⚡ 二、期貨市場：三大法人買賣超與未平倉統計（嚴格區分【整日合計】、【日盤】與【夜盤】）")
-    st.dataframe(pd.DataFrame(fut_rows), width="stretch", hide_index=True)
-
-    st.info("""
-    📝 **【統計口徑說明與實戰備註】**
-    * **【註1｜現貨三大市場（上市 / 上櫃 / 興櫃）】**：興櫃市場依法規無開放融資融券信用交易及權證發行，故融資融券標示為「不適用 (無信用交易)」，自營商-避險為 0；興櫃自營商自行買賣包含推薦證券商（造市商）報價部位。
-    * **【註2｜期貨「整日」與「夜盤（盤後交易時段）」歸屬基準】**：依臺灣期貨交易所結算規則，前一日下午 `15:00 ~ 次日凌晨 05:00` 之夜盤交易併入次一營業日（T日）帳務，故 **整日買賣超 ＝ 夜盤（15:00~05:00）＋ 日盤（08:45~13:45）**。
-    * **【註3｜契約金額折算】**：臺指期（TX 大台）每點價值新台幣 200 元、小台（MTX）每點 50 元、微台（TMF）每點 10 元；買賣超契約金額 ＝ 買賣超口數 × 期貨均價 × 契約乘數。
-    """)
+    st.dataframe(pd.DataFrame(fut_rows), use_container_width=True, hide_index=True)
 
 # ==================== 【分頁六】即時資金流與類股主動買賣盤回測系統 ====================
 with tab6:
@@ -988,7 +973,7 @@ with tab6:
                 ), row=1, col=2)
 
                 fig_flow.update_layout(height=620, showlegend=False, template="plotly_dark", paper_bgcolor="#111318", plot_bgcolor="#111318", yaxis=dict(categoryorder="array", categoryarray=df_sec["產業類股"].tolist()), margin=dict(t=40, b=20))
-                st.plotly_chart(fig_flow, width="stretch")
+                st.plotly_chart(fig_flow, use_container_width=True)
 
         if auto_play:
             for step_t in ["09:00", "09:02", "09:07", "09:13", "09:14", "09:30", "10:30", "12:00", "13:30"]:
@@ -1041,5 +1026,5 @@ with tab6:
             fc3.metric("🔥 對應勝率", f"{bf['勝率 (%)']:.1f}%")
             fc4.metric("💎 單次最大利潤", f"{bf['單次最大利潤 (%)']:+.2f}%")
             fc5.metric("💥 單次最大虧損", f"{bf['單次最大虧損 (%)']:+.2f}%")
-            st.plotly_chart(px.line(df_f_opt, x="持有天數", y=["單次期望值 (%)", "勝率 (%)"], markers=True, template="plotly_dark"), width="stretch")
-            st.dataframe(df_f_opt, width="stretch", hide_index=True)
+            st.plotly_chart(px.line(df_f_opt, x="持有天數", y=["單次期望值 (%)", "勝率 (%)"], markers=True, template="plotly_dark"), use_container_width=True)
+            st.dataframe(df_f_opt, use_container_width=True, hide_index=True)
