@@ -1,0 +1,39 @@
+name: Daily TWSE TPEx & Broker Data Auto-Updater
+
+on:
+  schedule:
+    # 每個交易日 UTC 09:30 (即台灣時間下午 17:30) 自動執行
+    - cron: '30 9 * * 1-5'
+  workflow_dispatch: # 支援在 GitHub 網頁上手動點擊按鈕立即觸發更新
+
+permissions:
+  contents: write
+
+jobs:
+  update-market-data:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas numpy pyarrow requests FinMind beautifulsoup4 lxml urllib3
+
+      - name: Run Daily Official & Broker Crawler
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: |
+          python daily_crawler.py
+
+      - name: Commit and Push updated Parquet files to local data folder
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/
+          git diff --quiet && git diff --staged --quiet || (git commit -m "📊 Auto-update daily TWSE/TPEx & Broker local data" && git push)
