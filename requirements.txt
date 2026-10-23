@@ -8,3 +8,4 @@ requests
 pyarrow
 beautifulsoup4
 lxml
+urllib3
